@@ -18,7 +18,11 @@
     "url": "git+https://github.com/jzszdznzzl/localdb.git"
   },
   "license": "MIT",
-  "author": "José Daniel Cristaldo Vera",
+  "author": {
+    "name": "José Daniel Cristaldo Vera",
+    "url": "https://jzszdznzzl.dev",
+    "email": "me@jzszdznzzl.dev"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -48,11 +52,13 @@
     "test:bun": "bun test src",
     "bench": "node --expose-gc --max-old-space-size=8192 scripts/bench.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
-    "prepublishOnly": "pnpm check && pnpm build"
+    "prepare": "pnpm build",
+    "prepublishOnly": "pnpm check"
   },
   "devDependencies": {
     "@arethetypeswrong/core": "0.18.5",
     "@types/node": "24.19.2",
+    "lowdb": "7.0.1",
     "oxlint": "1.88.0",
     "oxlint-tsgolint": "7.0.2004",
     "prettier": "3.9.10",
