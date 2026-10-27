@@ -146,7 +146,7 @@ The first block is mandatory in every project. The second block shows typical va
 
     // --- Project-dependent: adjust per project ---
     "target": "ESNext",
-    "lib": ["ESNext"], // Add "DOM" for browser code.
+    "lib": ["ESNext"],
     "types": ["node"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
@@ -254,14 +254,14 @@ Types are only useful if they are true. The constructs below tell the compiler "
 - **No floating promises.** Every promise is awaited, returned, or ends in `.catch()`. Why: an unhandled rejection can crash the Node.js process.
 
 ```ts
-// Forbidden: compiles, but crashes at runtime as soon as the API response changes.
-const user = (await response.json()) as User;
+// Forbidden: compiles, but crashes at runtime as soon as the file is edited by hand.
+const user = JSON.parse(line) as User;
 
 // Required: the shape is verified before the value is used.
-const parsed = User.safeParse(await response.json());
+const parsed = User.safeParse(JSON.parse(line));
 
 if (!parsed.success) {
-  return { data: null, error: FetchError.InvalidResponse };
+  return { data: null, error: DbError.InvalidFile };
 }
 
 const user = parsed.data;

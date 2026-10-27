@@ -35,7 +35,7 @@ pnpm install
 1. **Create a branch** from the default branch.
 2. **Commit** following [Conventional Commits](https://www.conventionalcommits.org/):
    - `feat: add user search`
-   - `fix(api): handle empty query`
+   - `fix(storage): ignore a torn last line`
    - `chore: update dependencies`
 3. **Before opening a pull request**, make sure these pass:
    - `pnpm lint`
