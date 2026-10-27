@@ -12,6 +12,8 @@ pnpm add @jzszdznzzl/localdb zod
 
 zod 4 is a peer dependency, so your schemas and localdb share one copy of it.
 
+Requires Node.js 24 or later, or Bun. The package is ESM only.
+
 ## Example
 
 ```ts

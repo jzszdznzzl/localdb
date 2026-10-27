@@ -11,7 +11,5 @@ export default defineConfig({
   sourcemap: true,
   publint: { level: 'warning' },
   attw: { profile: 'esm-only', level: 'error' },
-  // npm only ships what `files` lists, and the MIT license must travel with every copy.
-  copy: [{ from: `${import.meta.dirname}/LICENSE` }],
   deps: { onlyBundle: [] },
 });
