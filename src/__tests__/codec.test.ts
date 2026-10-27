@@ -87,3 +87,11 @@ test('malformed tags are reported, not thrown', () => {
     assert.notEqual(decode(value).error, null, JSON.stringify(value));
   }
 });
+
+test('dates are written as epoch milliseconds, and ISO strings are still read', () => {
+  const date = new Date('2026-01-02T03:04:05.678Z');
+
+  assert.deepEqual(encode(date), { __type: 'Date', value: date.getTime() });
+  assert.deepEqual(decode({ __type: 'Date', value: date.toISOString() }).data, date);
+  assert.notEqual(decode({ __type: 'Date', value: Number.NaN }).error, null);
+});

@@ -48,27 +48,58 @@ export type Input<S extends ObjectSchema> = Frozen<z.input<S>>;
 export type Change<S extends ObjectSchema> =
   Partial<Input<S>> | ((document: Document<S>) => Input<S>);
 
-const META_KEYS: ReadonlySet<string> = new Set([
+export const META_KEYS: ReadonlySet<string> = new Set([
   'id',
   'updatedAt',
 ] satisfies (keyof DocumentMeta)[]);
 
+function hasMeta(value: object): boolean {
+  for (const key of META_KEYS) {
+    if (Object.hasOwn(value, key)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** Copies an object without `id` and `updatedAt`, which are owned by the store, not the schema. */
 export function stripMeta(value: unknown): unknown {
-  if (!isPlainObject(value)) {
+  // Inserts rarely carry these keys, and returning the value as-is saves a copy per document.
+  if (!isPlainObject(value) || !hasMeta(value)) {
     return value;
   }
 
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !META_KEYS.has(key)));
+  const output: Record<string, unknown> = {};
+
+  for (const key in value) {
+    if (!META_KEYS.has(key)) {
+      output[key] = value[key];
+    }
+  }
+
+  return output;
 }
 
 export function deepFreeze<T>(value: T): Frozen<T>;
 export function deepFreeze(value: unknown): unknown {
   // Only arrays and plain objects are frozen: typed arrays refuse Object.freeze, and freezing a
   // Map, Set or Date would not stop their methods from changing them.
-  if (Array.isArray(value) || isPlainObject(value)) {
-    for (const entry of Object.values(value)) {
-      deepFreeze(entry);
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'object' && entry !== null) {
+        deepFreeze(entry);
+      }
+    }
+
+    Object.freeze(value);
+  } else if (isPlainObject(value)) {
+    for (const key in value) {
+      const entry = value[key];
+
+      if (typeof entry === 'object' && entry !== null) {
+        deepFreeze(entry);
+      }
     }
 
     Object.freeze(value);
@@ -82,15 +113,16 @@ export function createDocument<S extends ObjectSchema>(
   schema: S,
   value: unknown,
   meta: DocumentMeta,
-  label: string,
+  collection: string,
 ): Result<Document<S>, DbFailure> {
   const parsed = schema.safeParse(stripMeta(value));
 
   if (!parsed.success) {
+    // The label is built only on failure: building it for every document showed up in profiles.
     return err(
       failure(
         DbError.InvalidDocument,
-        `${label}: ${z.prettifyError(parsed.error)}`,
+        `${collection}/${meta.id.toString()}: ${z.prettifyError(parsed.error)}`,
         parsed.error.issues,
       ),
     );

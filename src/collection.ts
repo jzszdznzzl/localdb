@@ -1,5 +1,5 @@
-import { decode, encode, isPlainObject } from './codec.ts';
-import { createDocument } from './document.ts';
+import { decode, encodeFields, isPlainObject } from './codec.ts';
+import { createDocument, META_KEYS } from './document.ts';
 import { DbError, failure } from './errors.ts';
 import { Id } from './id.ts';
 import { err, ok } from './result.ts';
@@ -27,34 +27,18 @@ export interface CollectionHost {
   /** Called before any change, so an open transaction can take its snapshot first. */
   beforeChange(name: string): void;
   /** Called after a change with the ids it touched, so only those are written. */
-  afterChange(name: string, keys: readonly string[]): void;
+  afterChange(name: string, keys: string | readonly string[]): void;
 }
 
 export type Predicate<S extends ObjectSchema> = (document: Document<S>) => boolean;
 
-const keyOf = (id: Id | string): string =>
-  typeof id === 'string' ? id.toUpperCase() : id.toString();
+function toStored<S extends ObjectSchema>(document: Document<S>): StoredDocument {
+  if (!isPlainObject(document)) {
+    throw new Error('A stored document must be a plain object');
+  }
 
-function toStored(document: object): StoredDocument {
   // The id is the operation's key and updatedAt its `at`, so neither is repeated in the fields.
-  const fields: Record<string, unknown> = {};
-  let at = 0;
-
-  for (const [key, value] of Object.entries(document)) {
-    if (key === 'updatedAt' && value instanceof Date) {
-      at = value.getTime();
-    } else if (key !== 'id') {
-      fields[key] = value;
-    }
-  }
-
-  const encoded = encode(fields);
-
-  if (!isPlainObject(encoded)) {
-    throw new Error('A document must encode to an object');
-  }
-
-  return { at, doc: encoded };
+  return { at: document.updatedAt.getTime(), doc: encodeFields(document, META_KEYS) };
 }
 
 /** A named set of documents validated by one zod schema. Create it with `db.collection()`. */
@@ -100,28 +84,37 @@ export class Collection<S extends ObjectSchema> {
     });
   }
 
+  // Ids are stored uppercase. Trying the given string first skips creating an uppercase copy,
+  // which made every lookup several times slower.
+  #keyOf(id: Id | string): string {
+    if (typeof id !== 'string') {
+      return id.toString();
+    }
+
+    return this.#documents.has(id) ? id : id.toUpperCase();
+  }
+
   #prepare(stored: ReadonlyMap<string, StoredDocument>): Result<() => void, DbFailure> {
     const documents = new Map<string, Document<S>>();
 
     for (const [key, value] of stored) {
-      const label = `${this.#name}/${key}`;
       const id = Id.parse(key);
 
       if (id.error !== null) {
-        return err(failure(DbError.InvalidDocument, `${label}: ${id.error}`));
+        return err(failure(DbError.InvalidDocument, `${this.#name}/${key}: ${id.error}`));
       }
 
       const decoded = decode(value.doc);
 
       if (decoded.error !== null) {
-        return err(failure(DbError.InvalidDocument, `${label}: ${decoded.error}`));
+        return err(failure(DbError.InvalidDocument, `${this.#name}/${key}: ${decoded.error}`));
       }
 
       const document = createDocument(
         this.#schema,
         decoded.data,
         { id: id.data, updatedAt: new Date(value.at) },
-        label,
+        this.#name,
       );
 
       if (document.error !== null) {
@@ -137,18 +130,33 @@ export class Collection<S extends ObjectSchema> {
   }
 
   #build(value: unknown, id: Id): Result<Document<S>, DbFailure> {
-    return createDocument(
-      this.#schema,
-      value,
-      { id, updatedAt: new Date() },
-      `${this.#name}/${id.toString()}`,
-    );
+    return createDocument(this.#schema, value, { id, updatedAt: new Date() }, this.#name);
   }
 
   #next(document: Document<S>, change: Change<S>): Result<Document<S>, DbFailure> {
-    const value = typeof change === 'function' ? change(document) : { ...document, ...change };
+    if (typeof change === 'function') {
+      return this.#build(change(document), document.id);
+    }
 
-    return this.#build(value, document.id);
+    // The merge leaves out id and updatedAt itself, so the document is copied once, not twice.
+    const merged: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(document)) {
+      if (!META_KEYS.has(key)) {
+        merged[key] = value;
+      }
+    }
+
+    return this.#build(Object.assign(merged, change), document.id);
+  }
+
+  // The single-document path skips the arrays #commit needs, which mattered for insert loops.
+  #commitOne(document: Document<S>): void {
+    const key = document.id.toString();
+
+    this.#host.beforeChange(this.#name);
+    this.#documents.set(key, document);
+    this.#host.afterChange(this.#name, key);
   }
 
   #commit(documents: readonly Document<S>[]): void {
@@ -186,7 +194,7 @@ export class Collection<S extends ObjectSchema> {
     const document = this.#build(value, new Id());
 
     if (document.error === null) {
-      this.#commit([document.data]);
+      this.#commitOne(document.data);
     }
 
     return document;
@@ -216,13 +224,17 @@ export class Collection<S extends ObjectSchema> {
   get(id: Id | string): Document<S> | null {
     this.#host.assertReady();
 
-    return this.#documents.get(keyOf(id)) ?? null;
+    if (typeof id === 'string') {
+      return this.#documents.get(id) ?? this.#documents.get(id.toUpperCase()) ?? null;
+    }
+
+    return this.#documents.get(id.toString()) ?? null;
   }
 
   has(id: Id | string): boolean {
     this.#host.assertReady();
 
-    return this.#documents.has(keyOf(id));
+    return this.#documents.has(this.#keyOf(id));
   }
 
   find(predicate?: Predicate<S>): Document<S>[] {
@@ -253,16 +265,17 @@ export class Collection<S extends ObjectSchema> {
   update(id: Id | string, change: Change<S>): Result<Document<S>, DbFailure> {
     this.#host.assertReady();
 
-    const current = this.#documents.get(keyOf(id));
+    const key = this.#keyOf(id);
+    const current = this.#documents.get(key);
 
     if (!current) {
-      return err(failure(DbError.NotFound, `${this.#name}/${keyOf(id)}: not found`));
+      return err(failure(DbError.NotFound, `${this.#name}/${key}: not found`));
     }
 
     const document = this.#next(current, change);
 
     if (document.error === null) {
-      this.#commit([document.data]);
+      this.#commitOne(document.data);
     }
 
     return document;
@@ -290,7 +303,7 @@ export class Collection<S extends ObjectSchema> {
   remove(id: Id | string): boolean {
     this.#host.assertReady();
 
-    const key = keyOf(id);
+    const key = this.#keyOf(id);
 
     if (!this.#documents.has(key)) {
       return false;
@@ -298,7 +311,7 @@ export class Collection<S extends ObjectSchema> {
 
     this.#host.beforeChange(this.#name);
     this.#documents.delete(key);
-    this.#host.afterChange(this.#name, [key]);
+    this.#host.afterChange(this.#name, key);
 
     return true;
   }

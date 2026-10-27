@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { createInterface } from 'node:readline';
 import { z } from 'zod';
 
 import { err, ok } from './result.ts';
@@ -24,28 +23,33 @@ export interface LogContents {
 
 const FILE_VERSION = 2;
 const NOT_FOUND_CODE = 'ENOENT';
-// Snapshot lines are written in chunks of about this many characters, yielding in between.
+// Snapshot lines are written, and the file read, in chunks of about this size.
 const CHUNK_SIZE = 1 << 20;
+const NEWLINE = '\n';
 
 const Header = z.strictObject({ version: z.literal(FILE_VERSION) });
 
-const SetOperation = z.strictObject({
-  col: z.string().min(1),
-  id: z.string().min(1),
-  at: z.number().int(),
-  doc: z.record(z.string(), z.unknown()),
+// Plain objects instead of strict ones, and `doc` as a loose object instead of a record: this
+// runs once per line, and the document itself is validated by its collection schema anyway.
+const SetOperation = z.object({
+  col: z.string(),
+  id: z.string(),
+  at: z.number(),
+  doc: z.looseObject({}),
 });
 
-const RemoveOperation = z.strictObject({
-  col: z.string().min(1),
-  id: z.string().min(1),
+const RemoveOperation = z.object({
+  col: z.string(),
+  id: z.string(),
   del: z.literal(true),
 });
 
 const Operation = z.union([SetOperation, RemoveOperation]);
 
 // A line holds one operation, or an array of them that were saved together and apply together.
-const Line = z.union([Operation, z.array(Operation).min(1)]);
+const Batch = z.array(Operation).min(1);
+
+const BLANK_LINE = /^\s*$/;
 
 function isNotFound(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === NOT_FOUND_CODE;
@@ -57,15 +61,15 @@ function applyLine(
   lineNumber: number,
   isLast: boolean,
 ): Result<void, string> {
-  if (text.trim() === '') {
-    return ok(undefined);
-  }
-
   let json: unknown;
 
   try {
     json = JSON.parse(text);
   } catch {
+    if (BLANK_LINE.test(text)) {
+      return ok(undefined);
+    }
+
     // Appends are the only writes that are not atomic, and they only ever touch the end.
     if (isLast && lineNumber > 1) {
       contents.isTorn = true;
@@ -81,7 +85,7 @@ function applyLine(
     return header.success ? ok(undefined) : err(`line 1: ${z.prettifyError(header.error)}`);
   }
 
-  const parsed = Line.safeParse(json);
+  const parsed = Array.isArray(json) ? Batch.safeParse(json) : Operation.safeParse(json);
 
   if (!parsed.success) {
     return err(`line ${lineNumber}: ${z.prettifyError(parsed.error)}`);
@@ -98,7 +102,8 @@ function applyLine(
     if ('del' in operation) {
       documents.delete(operation.id);
     } else {
-      documents.set(operation.id, { at: operation.at, doc: operation.doc });
+      // The parsed operation already has `at` and `doc`, so it is kept instead of a new object.
+      documents.set(operation.id, operation);
     }
 
     contents.operations++;
@@ -117,11 +122,12 @@ export function formatOperation(
   id: string,
   stored: StoredDocument | null,
 ): string {
-  return JSON.stringify(
-    stored
-      ? { col: collection, id, at: stored.at, doc: stored.doc }
-      : { col: collection, id, del: true },
-  );
+  // The wrapper is written by hand: it is cheaper than letting JSON.stringify build it per line.
+  const prefix = `{"col":${JSON.stringify(collection)},"id":${JSON.stringify(id)}`;
+
+  return stored
+    ? `${prefix},"at":${stored.at},"doc":${JSON.stringify(stored.doc)}}`
+    : `${prefix},"del":true}`;
 }
 
 /**
@@ -139,33 +145,44 @@ export async function readLog(path: string): Promise<Result<LogContents | null, 
     throw error;
   }
 
-  const lines = createInterface({
-    input: createReadStream(path, { encoding: 'utf8' }),
-    crlfDelay: Number.POSITIVE_INFINITY,
-  });
+  // Splitting large chunks by hand is much faster than readline, which does extra work per line.
+  const stream = createReadStream(path, { encoding: 'utf8', highWaterMark: CHUNK_SIZE });
   const contents: LogContents = { collections: new Map(), operations: 0, isTorn: false };
-  // Each line is applied once the next one arrives, so the last line is known to be the last.
-  let previous: string | null = null;
+  let rest = '';
   let lineNumber = 0;
 
-  for await (const line of lines) {
-    if (previous !== null) {
-      const applied = applyLine(contents, previous, lineNumber, false);
+  for await (const chunk of stream) {
+    const text = `${rest}${String(chunk)}`;
+    let start = 0;
+    let end = text.indexOf(NEWLINE, start);
+
+    while (end !== -1) {
+      lineNumber++;
+      const applied = applyLine(contents, text.slice(start, end), lineNumber, false);
 
       if (applied.error !== null) {
+        stream.destroy();
         return applied;
       }
+
+      start = end + 1;
+      end = text.indexOf(NEWLINE, start);
     }
 
-    previous = line;
-    lineNumber++;
+    rest = text.slice(start);
   }
 
-  if (previous === null) {
+  if (lineNumber === 0 && rest === '') {
     return ok(null);
   }
 
-  const applied = applyLine(contents, previous, lineNumber, true);
+  if (rest === '') {
+    return ok(contents);
+  }
+
+  // Every write ends its line with a newline, so only a final piece without one can be torn.
+  lineNumber++;
+  const applied = applyLine(contents, rest, lineNumber, true);
 
   return applied.error === null ? ok(contents) : applied;
 }

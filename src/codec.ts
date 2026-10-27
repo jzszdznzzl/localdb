@@ -32,10 +32,10 @@ const TaggedValue = z.discriminatedUnion(TAG_KEY, [
   z.strictObject({ [TAG_KEY]: z.literal(Tag.Infinity) }),
   z.strictObject({ [TAG_KEY]: z.literal(Tag.NegativeInfinity) }),
   z.strictObject({ [TAG_KEY]: z.literal(Tag.BigInt), value: z.string().regex(BIGINT_PATTERN) }),
-  z.strictObject({
-    [TAG_KEY]: z.literal(Tag.Date),
-    value: z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'Invalid date'),
-  }),
+  // Dates and ids are checked while building them, which saves parsing each one twice.
+  // Dates are written as epoch milliseconds, which is several times cheaper than an ISO string in
+  // both directions. ISO strings are still read, so hand-written dates keep working.
+  z.strictObject({ [TAG_KEY]: z.literal(Tag.Date), value: z.union([z.number(), z.string()]) }),
   z.strictObject({ [TAG_KEY]: z.literal(Tag.RegExp), source: z.string(), flags: z.string() }),
   z.strictObject({
     [TAG_KEY]: z.literal(Tag.URL),
@@ -48,11 +48,16 @@ const TaggedValue = z.discriminatedUnion(TAG_KEY, [
   z.strictObject({ [TAG_KEY]: z.literal(Tag.Set), value: z.array(z.unknown()) }),
   z.strictObject({ [TAG_KEY]: z.literal(Tag.Buffer), value: z.base64() }),
   z.strictObject({ [TAG_KEY]: z.literal(Tag.Uint8Array), value: z.base64() }),
-  z.strictObject({
-    [TAG_KEY]: z.literal(Tag.Id),
-    value: z.string().refine((value) => Id.isValid(value), 'Invalid id'),
-  }),
+  z.strictObject({ [TAG_KEY]: z.literal(Tag.Id), value: z.string() }),
 ]);
+
+type TaggedValue = z.infer<typeof TaggedValue>;
+
+// Each tag is validated with its own schema: going through the whole union for every Date was
+// the largest cost of loading a file.
+const TAG_SCHEMAS: ReadonlyMap<unknown, z.ZodType<TaggedValue>> = new Map(
+  TaggedValue.options.map((option) => [option.shape[TAG_KEY].value, option]),
+);
 
 const describe = (value: unknown): string => {
   if (typeof value === 'object' && value !== null) {
@@ -62,40 +67,91 @@ const describe = (value: unknown): string => {
   return typeof value;
 };
 
-function decodeArray(values: readonly unknown[]): Result<unknown[], string> {
-  const output: unknown[] = [];
-
-  for (const value of values) {
-    const decoded = decode(value);
-
-    if (decoded.error !== null) {
-      return decoded;
-    }
-
-    output.push(decoded.data);
+// True when JSON.stringify would write `value` exactly, so encode can return it without copying.
+function isJsonSafe(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return true;
   }
 
-  return ok(output);
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (!isJsonSafe(entry)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  if (isPlainObject(value)) {
+    if (Object.hasOwn(value, TAG_KEY)) {
+      return false;
+    }
+
+    for (const key in value) {
+      const entry = value[key];
+
+      // An undefined property is dropped, which needs a copy.
+      if (entry === undefined || !isJsonSafe(entry)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+// Decoding works in place: parsed JSON belongs to the caller, so copying it would only add cost.
+function decodeArray(values: unknown[]): Result<unknown[], string> {
+  for (let index = 0; index < values.length; index++) {
+    const value = values[index];
+
+    if (typeof value === 'object' && value !== null) {
+      const decoded = decode(value);
+
+      if (decoded.error !== null) {
+        return decoded;
+      }
+
+      values[index] = decoded.data;
+    }
+  }
+
+  return ok(values);
 }
 
 function decodeEntries(record: Record<string, unknown>): Result<Record<string, unknown>, string> {
-  const output: Record<string, unknown> = {};
+  for (const key in record) {
+    const value = record[key];
 
-  for (const [key, value] of Object.entries(record)) {
-    const decoded = decode(value);
+    if (typeof value === 'object' && value !== null) {
+      const decoded = decode(value);
 
-    if (decoded.error !== null) {
-      return err(`${key}: ${decoded.error}`);
+      if (decoded.error !== null) {
+        return err(`${key}: ${decoded.error}`);
+      }
+
+      record[key] = decoded.data;
     }
-
-    output[key] = decoded.data;
   }
 
-  return ok(output);
+  return ok(record);
 }
 
 function decodeTagged(record: Record<string, unknown>): Result<unknown, string> {
-  const parsed = TaggedValue.safeParse(record);
+  const schema = TAG_SCHEMAS.get(record[TAG_KEY]);
+
+  if (!schema) {
+    return err(`unknown ${TAG_KEY}: ${JSON.stringify(record[TAG_KEY])}`);
+  }
+
+  const parsed = schema.safeParse(record);
 
   if (!parsed.success) {
     return err(`invalid ${TAG_KEY} value: ${z.prettifyError(parsed.error)}`);
@@ -123,7 +179,9 @@ function decodeTagged(record: Record<string, unknown>): Result<unknown, string> 
       return ok(BigInt(tagged.value));
     }
     case Tag.Date: {
-      return ok(new Date(tagged.value));
+      const date = new Date(tagged.value);
+
+      return Number.isNaN(date.getTime()) ? err(`invalid date: ${tagged.value}`) : ok(date);
     }
     case Tag.RegExp: {
       try {
@@ -162,7 +220,7 @@ function decodeTagged(record: Record<string, unknown>): Result<unknown, string> 
       return ok(new Uint8Array(Buffer.from(tagged.value, 'base64')));
     }
     case Tag.Id: {
-      return ok(new Id(tagged.value));
+      return Id.parse(tagged.value);
     }
     default: {
       // The schema accepted a tag this switch does not handle, so the two lists drifted apart.
@@ -224,7 +282,7 @@ export function encode(value: unknown): unknown {
       throw new TypeError('Cannot store an invalid Date');
     }
 
-    return { [TAG_KEY]: Tag.Date, value: value.toISOString() };
+    return { [TAG_KEY]: Tag.Date, value: value.getTime() };
   }
 
   if (value instanceof RegExp) {
@@ -256,27 +314,46 @@ export function encode(value: unknown): unknown {
   }
 
   if (Array.isArray(value)) {
-    return Array.from(value, (entry) => encode(entry));
+    return isJsonSafe(value) ? value : Array.from(value, (entry) => encode(entry));
   }
 
   if (isPlainObject(value)) {
-    const output: Record<string, unknown> = {};
-
-    for (const [key, entry] of Object.entries(value)) {
-      // JSON objects have no undefined, and an absent key reads back the same way.
-      if (entry !== undefined) {
-        output[key] = encode(entry);
-      }
-    }
-
-    // A user object that happens to own the tag key is wrapped, so it is not read back as a tag.
-    return Object.hasOwn(value, TAG_KEY) ? { [TAG_KEY]: Tag.Object, value: output } : output;
+    return isJsonSafe(value) ? value : encodeFields(value);
   }
 
   throw new TypeError(`Cannot store a value of type ${describe(value)}`);
 }
 
-/** Reverses `encode`. Malformed tags are reported as an error instead of throwing. */
+/**
+ * Encodes the own properties of a plain object, leaving out the keys in `skip`. Unlike `encode`,
+ * it always returns a new object, so callers can drop keys without copying the object first.
+ */
+export function encodeFields(
+  value: Record<string, unknown>,
+  skip: ReadonlySet<string> = new Set(),
+): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+
+  for (const key in value) {
+    const entry = value[key];
+
+    // JSON objects have no undefined, and an absent key reads back the same way.
+    if (entry !== undefined && !skip.has(key)) {
+      output[key] = encode(entry);
+    }
+  }
+
+  // A user object that happens to own the tag key is wrapped, so it is not read back as a tag.
+  return Object.hasOwn(value, TAG_KEY) && !skip.has(TAG_KEY)
+    ? { [TAG_KEY]: Tag.Object, value: output }
+    : output;
+}
+
+/**
+ * Reverses `encode`. Arrays and objects inside `value` are reused and changed in place, so pass
+ * data the caller owns, such as the output of `JSON.parse`. Malformed tags are reported as an
+ * error instead of throwing.
+ */
 export function decode(value: unknown): Result<unknown, string> {
   if (Array.isArray(value)) {
     return decodeArray(value);

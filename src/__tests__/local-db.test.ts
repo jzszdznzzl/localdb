@@ -162,6 +162,38 @@ test('the file is rewritten on its own once old versions pile up', async () => {
   assert.equal((await openUsers(db.path)).users.get(user.id)?.level, 1099);
 });
 
+test('changes made while a rewrite is running are saved by the next save', async () => {
+  const { db, users } = await openUsers();
+  unwrap(users.insertMany(Array.from({ length: 2000 }, (_, level) => ({ name: 'a', level }))));
+
+  const rewrite = db.save();
+  // One change before the rewrite takes its snapshot, and others while it is writing.
+  const early = unwrap(users.insert({ name: 'early', level: 1 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const late = unwrap(users.insert({ name: 'late', level: 1 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  users.remove(early.id);
+  await rewrite;
+  await db.save();
+
+  const reloaded = await openUsers(db.path);
+  assert.equal(reloaded.users.size, 2001);
+  assert.equal(reloaded.users.get(late.id)?.name, 'late');
+  assert.equal(reloaded.users.has(early.id), false);
+});
+
+test('past 10,000 pending changes the next save rewrites the file', async () => {
+  const { db, users } = await openUsers();
+  await db.save();
+  unwrap(users.insertMany(Array.from({ length: 10_001 }, (_, level) => ({ name: 'a', level }))));
+  unwrap(users.insert({ name: 'after', level: 1 }));
+  await db.save();
+
+  const lines = await readLines(db.path);
+  assert.equal(lines.length, 10_003);
+  assert.equal((await openUsers(db.path)).users.size, 10_002);
+});
+
 test('a large batch of changes is saved as a rewrite instead of one huge line', async () => {
   const { db, users } = await openUsers();
   await db.save();
@@ -212,6 +244,26 @@ test('declaring a collection after load validates what is stored', async () => {
   const strict = new LocalDB(path);
   unwrap(await strict.load());
   assert.throws(() => strict.collection('users', z.object({ email: z.email() })), /email/);
+});
+
+test('a collection rejected after load is kept intact in the file', async () => {
+  const path = await tempFile();
+  const Event = z.object({ at: z.date() });
+  const first = new LocalDB(path);
+  unwrap(await first.load());
+  unwrap(first.collection('events', Event).insert({ at: new Date(5000) }));
+  await first.save();
+
+  const second = new LocalDB(path);
+  unwrap(await second.load());
+  assert.throws(() => second.collection('events', z.object({ at: z.string() })));
+  second.collection('users', User);
+  await second.compact();
+
+  const third = new LocalDB(path);
+  const events = third.collection('events', Event);
+  unwrap(await third.load());
+  assert.deepEqual(events.find()[0]?.at, new Date(5000));
 });
 
 test('a broken file is reported and leaves memory untouched', async () => {

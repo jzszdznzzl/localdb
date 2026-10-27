@@ -48,9 +48,11 @@ export class LocalDB {
   #undeclared = new Map<string, Map<string, StoredDocument>>();
   // Ids changed since the last write, by collection. Only these are appended on save.
   #pending = new Map<string, Set<string>>();
+  #pendingSize = 0;
   #fileOperations = 0;
-  #hasFile = false;
-  #needsCompaction = false;
+  // The next write must rewrite the whole file: there is no file yet, its end is torn, an append
+  // failed, or there are too many changes to append. Changed ids are not tracked meanwhile.
+  #needsRewrite = false;
   #isLoaded = false;
   #isClosed = false;
   #timer: NodeJS.Timeout | null = null;
@@ -72,6 +74,12 @@ export class LocalDB {
       }
     },
     afterChange: (name, keys) => {
+      this.#scheduleAutosave();
+
+      if (this.#needsRewrite) {
+        return;
+      }
+
       let pending = this.#pending.get(name);
 
       if (!pending) {
@@ -79,11 +87,22 @@ export class LocalDB {
         this.#pending.set(name, pending);
       }
 
-      for (const key of keys) {
-        pending.add(key);
+      const before = pending.size;
+
+      if (typeof keys === 'string') {
+        pending.add(keys);
+      } else {
+        for (const key of keys) {
+          pending.add(key);
+        }
       }
 
-      this.#scheduleAutosave();
+      this.#pendingSize += pending.size - before;
+
+      if (this.#pendingSize > MAX_APPEND_OPERATIONS) {
+        this.#needsRewrite = true;
+        this.#takePending();
+      }
     },
   };
 
@@ -138,16 +157,6 @@ export class LocalDB {
     return write;
   }
 
-  #pendingCount(): number {
-    let count = 0;
-
-    for (const keys of this.#pending.values()) {
-      count += keys.size;
-    }
-
-    return count;
-  }
-
   #liveCount(): number {
     let count = 0;
 
@@ -165,6 +174,7 @@ export class LocalDB {
   #takePending(): Map<string, Set<string>> {
     const taken = this.#pending;
     this.#pending = new Map();
+    this.#pendingSize = 0;
 
     return taken;
   }
@@ -176,20 +186,22 @@ export class LocalDB {
 
       this.#pending.set(name, pending ? new Set([...keys, ...pending]) : keys);
     }
+
+    this.#pendingSize = 0;
+
+    for (const keys of this.#pending.values()) {
+      this.#pendingSize += keys.size;
+    }
   }
 
   async #write(): Promise<void> {
-    const pendingCount = this.#pendingCount();
-
-    if (pendingCount === 0 && this.#hasFile && !this.#needsCompaction) {
+    if (!this.#needsRewrite && this.#pendingSize === 0) {
       return;
     }
 
     const shouldCompact =
-      !this.#hasFile ||
-      this.#needsCompaction ||
-      pendingCount > MAX_APPEND_OPERATIONS ||
-      this.#fileOperations + pendingCount > this.#liveCount() * COMPACT_RATIO + COMPACT_SLACK;
+      this.#needsRewrite ||
+      this.#fileOperations + this.#pendingSize > this.#liveCount() * COMPACT_RATIO + COMPACT_SLACK;
 
     await (shouldCompact ? this.#compact() : this.#append());
   }
@@ -219,13 +231,15 @@ export class LocalDB {
     } catch (error) {
       this.#restorePending(taken);
       // The append may have left half a line, so the next write rewrites the whole file.
-      this.#needsCompaction = true;
+      this.#needsRewrite = true;
       throw error;
     }
   }
 
   async #compact(): Promise<void> {
     const taken = this.#takePending();
+    // Changes made while the snapshot is written are tracked again, so the next save appends them.
+    this.#needsRewrite = false;
     const sources: [string, Iterable<[string, StoredDocument]>][] = [
       ...Array.from(
         this.#undeclared,
@@ -256,11 +270,10 @@ export class LocalDB {
       await writeSnapshot(this.#path, lines());
     } catch (error) {
       this.#restorePending(taken);
+      this.#needsRewrite = true;
       throw error;
     }
 
-    this.#hasFile = true;
-    this.#needsCompaction = false;
     this.#fileOperations = counter.operations;
   }
 
@@ -273,7 +286,7 @@ export class LocalDB {
   }
 
   get hasUnsavedChanges(): boolean {
-    return this.#pendingCount() > 0 || !this.#hasFile || this.#needsCompaction;
+    return this.#needsRewrite || this.#pendingSize > 0;
   }
 
   /** Names of the declared collections and of any other collections found in the file. */
@@ -302,7 +315,9 @@ export class LocalDB {
     const stored = this.#undeclared.get(name);
 
     if (stored) {
-      const prepared = this.#handles.get(name)?.prepare(stored);
+      // Preparing decodes documents in place, and if this schema rejects them they stay undeclared
+      // and are written back later, so it must work on a copy.
+      const prepared = this.#handles.get(name)?.prepare(structuredClone(stored));
 
       if (prepared?.error) {
         this.#handles.delete(name);
@@ -354,10 +369,10 @@ export class LocalDB {
       Array.from(collections).filter(([name]) => !this.#handles.has(name)),
     );
     this.#clearTimer();
-    this.#pending = new Map();
-    this.#hasFile = log.data !== null;
-    // A torn last line would be followed by the next append, so the file is rewritten instead.
-    this.#needsCompaction = log.data?.isTorn ?? false;
+    this.#takePending();
+    // A missing file is created by a rewrite, and a torn last line would be followed by the next
+    // append, so the file is rewritten instead.
+    this.#needsRewrite = log.data === null || log.data.isTorn;
     this.#fileOperations = log.data?.operations ?? 0;
     this.#isLoaded = true;
 
