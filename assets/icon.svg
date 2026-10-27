@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="localdb">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#0891B2"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <!-- Database cylinder -->
+  <path d="M30 38v52c0 7.7 15.2 14 34 14s34-6.3 34-14V38" fill="none" stroke="#fff" stroke-width="6" stroke-linejoin="round"/>
+  <ellipse cx="64" cy="38" rx="34" ry="14" fill="none" stroke="#fff" stroke-width="6"/>
+  <!-- JSON Lines inside: older lines, then the newest appended line -->
+  <rect x="44" y="58" width="40" height="6" rx="3" fill="#fff" opacity="0.6"/>
+  <rect x="44" y="70" width="28" height="6" rx="3" fill="#fff" opacity="0.6"/>
+  <rect x="44" y="82" width="34" height="6" rx="3" fill="#FDE68A"/>
+  <circle cx="86" cy="85" r="4" fill="#FDE68A"/>
+</svg>
