@@ -24,6 +24,25 @@ const DEFAULT_SIZES = [10_000, 100_000, 1_000_000];
 const SCANS = 10;
 const MB = 1024 * 1024;
 
+// Measures the longest time the event loop could not run a timer while `fn` was running.
+async function longestBlock(fn: () => Promise<unknown>): Promise<number> {
+  let last = performance.now();
+  let longest = 0;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    longest = Math.max(longest, now - last);
+    last = now;
+  }, 1);
+
+  try {
+    await fn();
+  } finally {
+    clearInterval(timer);
+  }
+
+  return Math.max(longest, performance.now() - last);
+}
+
 const formatNumber = (value: number): string => Math.round(value).toLocaleString('en-US');
 
 const collectGarbage = (): void => {
@@ -69,7 +88,7 @@ function printRows(rows: readonly Row[]): void {
 
 async function runStage(size: number): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'localdb-bench-'));
-  const path = join(directory, 'bench.json');
+  const path = join(directory, 'bench.jsonl');
   const rows: Row[] = [];
 
   try {
@@ -144,7 +163,9 @@ async function runStage(size: number): Promise<void> {
       users.updateMany((user) => user.level === 50, { level: 51 }),
     );
 
-    await timeAsync(rows, 'save (full file)', size, () => db.save());
+    const saveBlock = await longestBlock(() =>
+      timeAsync(rows, 'save (first save = full file)', size, () => db.save()),
+    );
     const fileSize = (await stat(path)).size;
 
     const reopened = new LocalDB(path);
@@ -168,6 +189,10 @@ async function runStage(size: number): Promise<void> {
     });
 
     const saves = 5;
+    const compactBlock = await longestBlock(() =>
+      timeAsync(rows, 'compact (rewrite file)', size, () => db.compact()),
+    );
+
     await timeAsync(rows, `save after 1 change x${saves}`, saves, async () => {
       for (let index = 0; index < saves; index++) {
         const id = ids[removals + index];
@@ -185,6 +210,7 @@ async function runStage(size: number): Promise<void> {
     console.log(
       [
         `file size: ${(fileSize / MB).toFixed(1)} MB`,
+        `longest event-loop block: full save ${saveBlock.toFixed(0)} ms, compact ${compactBlock.toFixed(0)} ms`,
         `heap for documents: ${((heapAfter - heapBefore) / MB).toFixed(1)} MB (~${formatNumber((heapAfter - heapBefore) / size)} bytes each)`,
         `rss: ${(process.memoryUsage().rss / MB).toFixed(0)} MB`,
       ].join('\n'),

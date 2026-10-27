@@ -1,6 +1,4 @@
-import { z } from 'zod';
-
-import { decode, encode } from './codec.ts';
+import { decode, encode, isPlainObject } from './codec.ts';
 import { createDocument } from './document.ts';
 import { DbError, failure } from './errors.ts';
 import { Id } from './id.ts';
@@ -8,12 +6,17 @@ import { err, ok } from './result.ts';
 import type { Change, Document, Input, ObjectSchema } from './document.ts';
 import type { DbFailure } from './errors.ts';
 import type { Result } from './result.ts';
+import type { StoredDocument } from './storage.ts';
 
 /** The non-generic side of a collection that `LocalDB` drives: loading, saving and rollback. */
 export interface CollectionHandle {
+  readonly size: number;
   /** Validates stored data and returns a function that swaps it in, so a load is all-or-nothing. */
-  prepare(stored: Record<string, unknown>): Result<() => void, DbFailure>;
-  serialize(): Record<string, unknown>;
+  prepare(stored: ReadonlyMap<string, StoredDocument>): Result<() => void, DbFailure>;
+  /** The stored form of one document, or null if it no longer exists. */
+  read(key: string): StoredDocument | null;
+  /** The stored form of every document, encoded lazily from a copy taken when this is called. */
+  entries(): Iterable<[string, StoredDocument]>;
   /** Copies the current documents and returns a function that restores that copy. */
   snapshot(): () => void;
 }
@@ -23,15 +26,36 @@ export interface CollectionHost {
   assertReady(): void;
   /** Called before any change, so an open transaction can take its snapshot first. */
   beforeChange(name: string): void;
-  afterChange(): void;
+  /** Called after a change with the ids it touched, so only those are written. */
+  afterChange(name: string, keys: readonly string[]): void;
 }
 
 export type Predicate<S extends ObjectSchema> = (document: Document<S>) => boolean;
 
-const StoredMeta = z.looseObject({ updatedAt: z.date() });
-
 const keyOf = (id: Id | string): string =>
   typeof id === 'string' ? id.toUpperCase() : id.toString();
+
+function toStored(document: object): StoredDocument {
+  // The id is the operation's key and updatedAt its `at`, so neither is repeated in the fields.
+  const fields: Record<string, unknown> = {};
+  let at = 0;
+
+  for (const [key, value] of Object.entries(document)) {
+    if (key === 'updatedAt' && value instanceof Date) {
+      at = value.getTime();
+    } else if (key !== 'id') {
+      fields[key] = value;
+    }
+  }
+
+  const encoded = encode(fields);
+
+  if (!isPlainObject(encoded)) {
+    throw new Error('A document must encode to an object');
+  }
+
+  return { at, doc: encoded };
+}
 
 /** A named set of documents validated by one zod schema. Create it with `db.collection()`. */
 export class Collection<S extends ObjectSchema> {
@@ -45,9 +69,27 @@ export class Collection<S extends ObjectSchema> {
     this.#schema = schema;
     this.#host = host;
 
+    const documents = (): Map<string, Document<S>> => this.#documents;
+
     host.attach(name, {
+      get size() {
+        return documents().size;
+      },
       prepare: (stored) => this.#prepare(stored),
-      serialize: () => this.#serialize(),
+      read: (key) => {
+        const document = this.#documents.get(key);
+
+        return document ? toStored(document) : null;
+      },
+      entries: () => {
+        const copy = Array.from(this.#documents);
+
+        return (function* encodeAll(): Generator<[string, StoredDocument]> {
+          for (const [key, document] of copy) {
+            yield [key, toStored(document)];
+          }
+        })();
+      },
       snapshot: () => {
         const copy = new Map(this.#documents);
 
@@ -58,10 +100,10 @@ export class Collection<S extends ObjectSchema> {
     });
   }
 
-  #prepare(stored: Record<string, unknown>): Result<() => void, DbFailure> {
+  #prepare(stored: ReadonlyMap<string, StoredDocument>): Result<() => void, DbFailure> {
     const documents = new Map<string, Document<S>>();
 
-    for (const [key, value] of Object.entries(stored)) {
+    for (const [key, value] of stored) {
       const label = `${this.#name}/${key}`;
       const id = Id.parse(key);
 
@@ -69,28 +111,16 @@ export class Collection<S extends ObjectSchema> {
         return err(failure(DbError.InvalidDocument, `${label}: ${id.error}`));
       }
 
-      const decoded = decode(value);
+      const decoded = decode(value.doc);
 
       if (decoded.error !== null) {
         return err(failure(DbError.InvalidDocument, `${label}: ${decoded.error}`));
       }
 
-      const meta = StoredMeta.safeParse(decoded.data);
-
-      if (!meta.success) {
-        return err(
-          failure(
-            DbError.InvalidDocument,
-            `${label}: ${z.prettifyError(meta.error)}`,
-            meta.error.issues,
-          ),
-        );
-      }
-
       const document = createDocument(
         this.#schema,
         decoded.data,
-        { id: id.data, updatedAt: meta.data.updatedAt },
+        { id: id.data, updatedAt: new Date(value.at) },
         label,
       );
 
@@ -104,18 +134,6 @@ export class Collection<S extends ObjectSchema> {
     return ok(() => {
       this.#documents = documents;
     });
-  }
-
-  #serialize(): Record<string, unknown> {
-    const output: Record<string, unknown> = {};
-
-    for (const [key, document] of this.#documents) {
-      // The id is already the key, so it is not repeated inside the document.
-      const { id: _id, ...fields } = document;
-      output[key] = encode(fields);
-    }
-
-    return output;
   }
 
   #build(value: unknown, id: Id): Result<Document<S>, DbFailure> {
@@ -140,11 +158,15 @@ export class Collection<S extends ObjectSchema> {
 
     this.#host.beforeChange(this.#name);
 
+    const keys: string[] = [];
+
     for (const document of documents) {
-      this.#documents.set(document.id.toString(), document);
+      const key = document.id.toString();
+      this.#documents.set(key, document);
+      keys.push(key);
     }
 
-    this.#host.afterChange();
+    this.#host.afterChange(this.#name, keys);
   }
 
   get name(): string {
@@ -276,7 +298,7 @@ export class Collection<S extends ObjectSchema> {
 
     this.#host.beforeChange(this.#name);
     this.#documents.delete(key);
-    this.#host.afterChange();
+    this.#host.afterChange(this.#name, [key]);
 
     return true;
   }
@@ -295,7 +317,7 @@ export class Collection<S extends ObjectSchema> {
       this.#documents.delete(key);
     }
 
-    this.#host.afterChange();
+    this.#host.afterChange(this.#name, keys);
 
     return keys.length;
   }

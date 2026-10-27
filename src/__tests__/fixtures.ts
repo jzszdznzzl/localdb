@@ -21,7 +21,7 @@ function isOk<T, E>(result: Result<T, E>): result is { data: T; error: null } {
   return result.error === null;
 }
 
-export async function tempFile(name = 'db.json'): Promise<string> {
+export async function tempFile(name = 'db.jsonl'): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'localdb-'));
 
   after(async () => {

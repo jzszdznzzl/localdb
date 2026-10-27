@@ -1,8 +1,8 @@
 # @jzszdznzzl/localdb
 
-A typed document store in a single JSON file, for Node.js and Bun.
+A typed document store in a single JSON Lines file, for Node.js and Bun.
 
-Each collection is described by a [zod](https://zod.dev) schema, so every document is validated when it is written and again when the file is loaded. Queries are plain TypeScript functions, writes are atomic, and the file stays readable.
+Each collection is described by a [zod](https://zod.dev) schema, so every document is validated when it is written and again when the file is loaded. Queries are plain TypeScript functions, saves only write what changed, and the file stays readable.
 
 Good for bots, CLIs, small servers and desktop tools: anything that needs to keep data between runs without running a database server.
 
@@ -25,7 +25,7 @@ const User = z.object({
   tags: z.array(z.string()).default([]),
 });
 
-const db = new LocalDB('data/app.json', { autosave: true });
+const db = new LocalDB('data/app.jsonl', { autosave: true });
 const users = db.collection('users', User);
 
 const loaded = await db.load();
@@ -101,16 +101,17 @@ const Post = z.object({ authorId: z.instanceof(Id), text: z.string() });
 | `autosave` | `false`         | `true` saves 500 ms after a change; `{ delay }` sets the wait in ms. |
 | `onError`  | `console.error` | Receives autosave failures. The next change retries the write.       |
 
-| Member                     | Description                                                               |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `collection(name, schema)` | Declares a collection. Declare each one once and share it.                |
-| `load()`                   | Reads the file. A missing file is an empty database. All-or-nothing.      |
-| `save()`                   | Writes pending changes. Calls run one after another.                      |
-| `transaction(fn)`          | Runs a synchronous `fn` and undoes its changes if it throws.              |
-| `close()`                  | Stops autosave, writes pending changes and ends the instance.             |
-| `path`                     | Absolute path of the file.                                                |
-| `collections`              | Names of declared collections and of other collections found in the file. |
-| `hasUnsavedChanges`        | Whether memory differs from the file.                                     |
+| Member                     | Description                                                                                             |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `collection(name, schema)` | Declares a collection. Declare each one once and share it.                                              |
+| `load()`                   | Reads the file. A missing file is an empty database. All-or-nothing.                                    |
+| `save()`                   | Appends pending changes, or rewrites the file when it has grown too large. Calls run one after another. |
+| `compact()`                | Rewrites the file with only the current documents.                                                      |
+| `transaction(fn)`          | Runs a synchronous `fn` and undoes its changes if it throws.                                            |
+| `close()`                  | Stops autosave, writes pending changes and ends the instance.                                           |
+| `path`                     | Absolute path of the file.                                                                              |
+| `collections`              | Names of declared collections and of other collections found in the file.                               |
+| `hasUnsavedChanges`        | Whether memory differs from the file.                                                                   |
 
 ### Collection
 
@@ -131,26 +132,21 @@ const Post = z.object({ authorId: z.instanceof(Id), text: z.string() });
 
 ## Storage
 
-The file is formatted JSON, keyed by collection and then by id:
+The file is [JSON Lines](https://jsonlines.org): a header, then one operation per line. A save appends only the documents that changed since the last save, so its cost depends on the changes, not on the size of the database:
 
-```json
-{
-  "version": 1,
-  "collections": {
-    "users": {
-      "01JBCX9Q4ZK3T7M2V8N5RWEYHD": {
-        "name": "Jxsx",
-        "level": 51,
-        "tags": [],
-        "updatedAt": { "__type": "Date", "value": "2026-10-27T14:54:29.668Z" }
-      }
-    }
-  }
-}
+```jsonl
+{"version":2}
+{"col":"users","id":"01JBCX9Q4ZK3T7M2V8N5RWEYHD","at":1793112869668,"doc":{"name":"Jxsx","level":50,"tags":[]}}
+{"col":"users","id":"01JBCX9Q4ZK3T7M2V8N5RWEYHD","at":1793112870012,"doc":{"name":"Jxsx","level":51,"tags":[]}}
+[{"col":"users","id":"01JBCXA0B4…","at":1793112871000,"doc":{…}},{"col":"users","id":"01JBCX9Q4Z…","del":true}]
 ```
 
+- **Operations:** `doc` holds the document's fields, `at` its `updatedAt` in milliseconds, and `del` marks a removal. Loading replays the lines in order, so the last line for an id wins.
+- **One line per save:** when a save writes several operations, they share one line, so a crash either keeps all of them or none. That includes everything a transaction changed.
+- **Crashes:** a last line cut short by a crash is ignored on load, and the next save rewrites the file.
+- **Compaction:** once the file holds more than twice as many operations as there are live documents (plus 1,000), or a save has over 10,000 changes, the save rewrites the file with only the current documents instead of appending. `compact()` does the same on demand. The rewrite goes to a temporary file that is renamed over the old one, in chunks, so it does not block the process.
+- **Large files:** the file is read line by line and written in chunks, so it is never held in memory as one string.
 - **Extra types:** `Date`, `Map`, `Set`, `BigInt`, `Buffer`, `Uint8Array`, `URL`, `RegExp`, `Id`, `NaN`, `Infinity` and `undefined` in arrays are saved with a `__type` tag and come back as the same types. A user object that has its own `__type` key is wrapped, so it is never mistaken for a tag.
-- **Atomic writes:** a save writes a temporary file next to the database and renames it over the old one, so a crash mid-write leaves the previous version intact.
 - **Undeclared collections:** collections in the file that the program does not declare are kept and written back unchanged.
 - **Transforms:** loading validates stored documents with the same schema, so a schema's transforms must accept their own output.
 
@@ -158,7 +154,7 @@ The file is formatted JSON, keyed by collection and then by id:
 
 Version 2 is a rewrite with a different API and file format:
 
-- **Format:** files are JSON instead of BSON.
+- **Format:** files are JSON Lines instead of BSON.
 - **Schemas:** every collection takes a zod schema.
 - **Queries:** filters are functions instead of objects.
 - **Ids:** documents have an `id` (`Id`) instead of `__uuid`, and `createdAt` is replaced by `id.timestamp`.

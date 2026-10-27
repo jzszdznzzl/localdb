@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -10,7 +10,13 @@ import { Id } from '../id.ts';
 import { LocalDB } from '../local-db.ts';
 import { openUsers, tempFile, unwrap, User } from './fixtures.ts';
 
-const readJson = async (path: string): Promise<unknown> => JSON.parse(await readFile(path, 'utf8'));
+const readLines = async (path: string): Promise<unknown[]> =>
+  (await readFile(path, 'utf8'))
+    .split('\n')
+    .filter((line) => line !== '')
+    .map((line): unknown => JSON.parse(line));
+
+const header = { version: 2 };
 
 test('documents survive a save and a fresh load, with their types', async () => {
   const path = await tempFile();
@@ -32,34 +38,139 @@ test('documents survive a save and a fresh load, with their types', async () => 
   assert.equal(post?.views, 10n);
 });
 
-test('the file is readable JSON keyed by id, without repeating the id', async () => {
+test('the file is a header followed by one JSON line per operation', async () => {
   const { db, users } = await openUsers();
   const user = unwrap(users.insert({ name: 'a', level: 1 }));
   await db.save();
 
-  assert.deepEqual(await readJson(db.path), {
-    version: 1,
-    collections: {
-      users: {
-        [user.id.toString()]: {
-          name: 'a',
-          level: 1,
-          tags: [],
-          updatedAt: { __type: 'Date', value: user.updatedAt.toISOString() },
-        },
-      },
+  assert.deepEqual(await readLines(db.path), [
+    header,
+    {
+      col: 'users',
+      id: user.id.toString(),
+      at: user.updatedAt.getTime(),
+      doc: { name: 'a', level: 1, tags: [] },
     },
-  });
+  ]);
 });
 
 test('a missing file loads empty, and the first save creates it with its folder', async () => {
-  const path = join(dirname(await tempFile()), 'nested', 'db.json');
+  const path = join(dirname(await tempFile()), 'nested', 'db.jsonl');
   const { db } = await openUsers(path);
 
   assert.equal(db.hasUnsavedChanges, true);
   await db.save();
-  assert.deepEqual(await readJson(path), { version: 1, collections: { users: {} } });
+  assert.deepEqual(await readLines(path), [header]);
   assert.equal(db.hasUnsavedChanges, false);
+});
+
+test('a save appends only what changed since the last one', async () => {
+  const { db, users } = await openUsers();
+  const [first, second] = unwrap(
+    users.insertMany([
+      { name: 'a', level: 1 },
+      { name: 'b', level: 2 },
+    ]),
+  );
+  assert.ok(first && second);
+  await db.save();
+  const sizeAfterInsert = (await stat(db.path)).size;
+
+  unwrap(users.update(first.id, { level: 5 }));
+  unwrap(users.update(first.id, { level: 6 }));
+  await db.save();
+  users.remove(second.id);
+  await db.save();
+  await db.save();
+
+  const lines = await readLines(db.path);
+  assert.equal(lines.length, 5);
+  assert.deepEqual(lines.at(-2), {
+    col: 'users',
+    id: first.id.toString(),
+    at: users.get(first.id)?.updatedAt.getTime(),
+    doc: { name: 'a', level: 6, tags: [] },
+  });
+  assert.deepEqual(lines.at(-1), { col: 'users', id: second.id.toString(), del: true });
+  assert.ok((await stat(db.path)).size > sizeAfterInsert);
+
+  const reloaded = await openUsers(db.path);
+  assert.deepEqual(reloaded.users.find(), users.find());
+});
+
+test('changes saved together share one line, so they load together or not at all', async () => {
+  const { db, users } = await openUsers();
+  await db.save();
+
+  db.transaction(() => {
+    unwrap(users.insert({ name: 'a', level: 1 }));
+    unwrap(users.insert({ name: 'b', level: 2 }));
+  });
+  await db.save();
+
+  const lines = await readLines(db.path);
+  assert.equal(lines.length, 2);
+  assert.ok(Array.isArray(lines[1]));
+  assert.equal(Array.isArray(lines[1]) ? lines[1].length : 0, 2);
+});
+
+test('a line cut short by a crash is ignored, and the next save rewrites the file', async () => {
+  const { db, users } = await openUsers();
+  const user = unwrap(users.insert({ name: 'a', level: 1 }));
+  await db.save();
+  await appendFile(db.path, '{"col":"users","id":"01');
+
+  const reloaded = await openUsers(db.path);
+  assert.deepEqual(reloaded.users.find(), [user]);
+  assert.equal(reloaded.db.hasUnsavedChanges, true);
+
+  await reloaded.db.save();
+  assert.equal((await readLines(db.path)).length, 2);
+});
+
+test('compact() keeps only the current version of each document', async () => {
+  const { db, users } = await openUsers();
+  const user = unwrap(users.insert({ name: 'a', level: 1 }));
+  await db.save();
+
+  for (let level = 2; level <= 5; level++) {
+    unwrap(users.update(user.id, { level }));
+    await db.save();
+  }
+
+  unwrap(users.insert({ name: 'b', level: 1 }));
+  users.remove(unwrap(users.insert({ name: 'gone', level: 1 })).id);
+  await db.save();
+  assert.equal((await readLines(db.path)).length, 7);
+
+  await db.compact();
+  assert.equal((await readLines(db.path)).length, 3);
+  assert.deepEqual((await openUsers(db.path)).users.find(), users.find());
+});
+
+test('the file is rewritten on its own once old versions pile up', async () => {
+  const { db, users } = await openUsers();
+  const user = unwrap(users.insert({ name: 'a', level: 1 }));
+  await db.save();
+
+  for (let level = 0; level < 1100; level++) {
+    unwrap(users.update(user.id, { level }));
+    await db.save();
+  }
+
+  assert.ok((await readLines(db.path)).length < 1100);
+  assert.equal((await openUsers(db.path)).users.get(user.id)?.level, 1099);
+});
+
+test('a large batch of changes is saved as a rewrite instead of one huge line', async () => {
+  const { db, users } = await openUsers();
+  await db.save();
+  unwrap(users.insertMany(Array.from({ length: 10_001 }, (_, level) => ({ name: 'a', level }))));
+  await db.save();
+
+  const lines = await readLines(db.path);
+  assert.equal(lines.length, 10_002);
+  assert.ok(lines.every((line) => !Array.isArray(line)));
 });
 
 test('saving leaves no temporary files behind', async () => {
@@ -67,7 +178,7 @@ test('saving leaves no temporary files behind', async () => {
   unwrap(users.insert({ name: 'a', level: 1 }));
   await Promise.all([db.save(), db.save(), db.save()]);
 
-  assert.deepEqual(await readdir(dirname(db.path)), ['db.json']);
+  assert.deepEqual(await readdir(dirname(db.path)), ['db.jsonl']);
 });
 
 test('collections this program does not declare are kept on save', async () => {
@@ -106,8 +217,15 @@ test('declaring a collection after load validates what is stored', async () => {
 test('a broken file is reported and leaves memory untouched', async () => {
   const { db, users } = await openUsers();
   unwrap(users.insert({ name: 'a', level: 1 }));
+  const id = new Id().toString();
 
-  for (const contents of ['{ nope', '{"version":2,"collections":{}}', '[]']) {
+  for (const contents of [
+    '{ nope',
+    '{"version":1,"collections":{}}',
+    '[]',
+    `{"version":2}\n{ nope\n{"col":"users","id":"${id}","del":true}\n`,
+    `{"version":2}\n{"col":"users","id":"${id}","doc":{}}\n`,
+  ]) {
     await writeFile(db.path, contents);
     const result = await db.load();
 
@@ -121,14 +239,9 @@ test('an invalid stored document fails the whole load', async () => {
   unwrap(users.insert({ name: 'a', level: 1 }));
   await db.save();
   const id = new Id().toString();
-  await writeFile(
+  await appendFile(
     db.path,
-    JSON.stringify({
-      version: 1,
-      collections: {
-        users: { [id]: { name: '', level: 1, updatedAt: { __type: 'Date', value: '2026-01-01' } } },
-      },
-    }),
+    `${JSON.stringify({ col: 'users', id, at: 0, doc: { name: '', level: 1 } })}\n`,
   );
 
   const result = await db.load();
@@ -159,20 +272,12 @@ test('autosave writes once after a burst of changes', async () => {
   await sleep(80);
   assert.equal(db.hasUnsavedChanges, false);
 
-  const stored = await readJson(db.path);
-  assert.equal(
-    Object.keys(
-      z
-        .object({ collections: z.object({ users: z.record(z.string(), z.unknown()) }) })
-        .parse(stored).collections.users,
-    ).length,
-    5,
-  );
+  assert.equal((await readLines(db.path)).length, 6);
 });
 
 test('autosave failures go to onError and are retried', async () => {
   const errors: unknown[] = [];
-  const path = join(await tempFile(), 'db.json');
+  const path = join(await tempFile(), 'db.jsonl');
   const { users, db } = await openUsers(path, {
     autosave: { delay: 5 },
     onError: (error) => errors.push(error),
