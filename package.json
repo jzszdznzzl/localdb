@@ -1,58 +1,67 @@
 {
-  "name": "@imjxsx/localdb",
-  "version": "1.1.1",
-  "description": "A lightweight MongoDB-style BSON database for Node.js",
+  "name": "@jzszdznzzl/localdb",
+  "version": "2.0.0",
+  "description": "A typed JSON document store for Node.js and Bun, validated with zod",
+  "keywords": [
+    "database",
+    "json",
+    "document-store",
+    "zod",
+    "local",
+    "embedded",
+    "localdb"
+  ],
+  "homepage": "https://github.com/jzszdznzzl/localdb#readme",
+  "bugs": "https://github.com/jzszdznzzl/localdb/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jzszdznzzl/localdb.git"
+  },
   "license": "MIT",
+  "author": "José Daniel Cristaldo Vera",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
     }
   },
   "files": [
-    "./dist",
-    "./README.md",
-    "./LICENSE"
+    "dist"
   ],
+  "packageManager": "pnpm@12.14.0",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=12"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "dev": "node ./example/index",
-    "build": "pnpm run build:types && pnpm run build:js",
-    "build:types": "tsc --emitDeclarationOnly",
-    "build:js": "esbuild './src/**/*.ts' --outbase=src --outdir=dist --format=esm --platform=node --target=es2022 --sourcemap --minify --packages=external",
-    "prepare": "pnpm run build"
-  },
-  "keywords": [
-    "database",
-    "bson",
-    "lowdb",
-    "lightweight",
-    "nosql",
-    "json-alternative",
-    "localdb"
-  ],
-  "author": "imjxsx",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/imjxsx/localdb.git"
-  },
-  "bugs": {
-    "url": "https://github.com/imjxsx/localdb/issues"
-  },
-  "homepage": "https://github.com/imjxsx/localdb#readme",
-  "packageManager": "pnpm@10.20.0",
-  "dependencies": {
-    "bson": "6.10.4"
+    "lint": "oxlint --type-aware",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "build": "tsdown",
+    "test": "node --test 'src/**/*.test.ts'",
+    "test:bun": "bun test src",
+    "bench": "node --expose-gc --max-old-space-size=8192 scripts/bench.ts",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
+    "prepublishOnly": "pnpm check && pnpm build"
   },
   "devDependencies": {
-    "@types/node": "24.9.2",
-    "esbuild": "0.27.0",
-    "tsx": "4.20.6",
-    "typescript": "5.9.3"
+    "@arethetypeswrong/core": "0.18.5",
+    "@types/node": "24.19.2",
+    "oxlint": "1.88.0",
+    "oxlint-tsgolint": "7.0.2004",
+    "prettier": "3.9.10",
+    "publint": "0.3.25",
+    "tsdown": "0.23.1",
+    "typescript": "7.0.2",
+    "zod": "4.6.7"
   },
-  "engines": {
-    "node": ">=20.0.0"
+  "peerDependencies": {
+    "zod": "^4.0.0"
   }
 }

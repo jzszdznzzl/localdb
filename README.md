@@ -1,94 +1,169 @@
-<div align="center">
+# @jzszdznzzl/localdb
 
-# **@imjxsx/localdb**
+A typed document store in a single JSON file, for Node.js and Bun.
 
-## *A lightweight MongoDB-style BSON database for Node.js*
+Each collection is described by a [zod](https://zod.dev) schema, so every document is validated when it is written and again when the file is loaded. Queries are plain TypeScript functions, writes are atomic, and the file stays readable.
 
-Fast, fully-typed, zero-dependency storage backed by BSON files.  
-Ideal for small apps, CLIs, bots, desktop tools, configs, caching, and offline data.
-
-![MIT License](https://img.shields.io/badge/License-MIT-green.svg)
-![Node Version](https://img.shields.io/badge/Node-%3E=20.0.0-blue)
-![BSON](https://img.shields.io/badge/Format-BSON-orange)
-![Status](https://img.shields.io/badge/Maintained-Yes-success)
-
-</div>
-
----
-
-<div align="center">
-
-## 📦 Installation
-
-</div>
+Good for bots, CLIs, small servers and desktop tools: anything that needs to keep data between runs without running a database server.
 
 ```bash
-npm i @imjxsx/localdb
-pnpm add @imjxsx/localdb
-yarn add @imjxsx/localdb
-bun add @imjxsx/localdb
+pnpm add @jzszdznzzl/localdb zod
 ```
 
----
+zod 4 is a peer dependency, so your schemas and localdb share one copy of it.
 
-<div align="center">
-
-## 🚀 Example of use
-
-</div>
+## Example
 
 ```ts
-import { LocalDB, IDocument } from "@imjxsx/localdb";
+import { z } from 'zod';
 
-interface IUser extends IDocument {
-  name: string;
-  level: number;
+import { LocalDB } from '@jzszdznzzl/localdb';
+
+const User = z.object({
+  name: z.string().min(1),
+  level: z.number().int(),
+  tags: z.array(z.string()).default([]),
+});
+
+const db = new LocalDB('data/app.json', { autosave: true });
+const users = db.collection('users', User);
+
+const loaded = await db.load();
+
+if (loaded.error) {
+  throw new Error(loaded.error.message);
 }
-const db = new LocalDB("data").db("app");
 
-// Load file
-await db.load();
+const created = users.insert({ name: 'Jxsx', level: 50 });
 
-// Obtain the collection or create it if it doesn't exist
-const users = db.collection<IUser>("users");
+if (created.error) {
+  console.error(created.error.message);
+} else {
+  users.update(created.data.id, (user) => ({ ...user, level: user.level + 1 }));
+}
 
-// Insert
-users.insertOne({ name: "Jxsx", level: 50 });
-users.insertOne({ name: "Luz", level: 20 });
+const veterans = users.find((user) => user.level >= 30);
 
-// Query
-console.log(users.findOne({ name: "Jxsx" }));
-console.log(users.find({ level: 20 }));
-
-// Update
-users.updateOne({ name: "Luz" }, { level: 30 });
-
-// Delete
-users.deleteOne({ name: "Jxsx" });
-
-// Save file
-await db.save();
+await db.close();
 ```
 
----
+## Results instead of exceptions
 
-<div align="center">
+Operations that can fail as part of normal use return a `Result` instead of throwing:
 
-## 🛠 Requirements
+```ts
+type Result<T, E> = { data: T; error: null } | { data: null; error: E };
+```
 
-</div>
+The error is a `DbFailure`: `{ code, message, issues }`, where `code` is one of `DbError.NotFound`, `DbError.InvalidDocument` or `DbError.InvalidFile`, and `issues` holds the zod issues when validation failed.
 
-- Node.js **>= 20.0.0**
-- TypeScript (optional but recommended)
+Programming mistakes still throw: using a collection before `load()`, declaring the same collection twice, or storing a value that cannot be saved, such as a function.
 
----
+## Documents
 
-<div align="center">
+A stored document is the schema's output plus two fields that localdb owns:
 
-## 📜 License
+- `id`: an `Id`, created on insert and never changed.
+- `updatedAt`: a `Date`, set on every insert and update.
 
-MIT © 2025 — Created & maintained by  
+Documents are deeply frozen. To change one, call `update`, which validates the new version and stores it in place of the old one. Values passed as `id` or `updatedAt` are ignored.
 
-### <a href="https://github.com/imjxsx">I'm Jxsx</a>
+## `Id`
 
-</div>
+`Id` is localdb's equivalent of MongoDB's `ObjectId`: 26 characters of Crockford base32, such as `01JBCX9Q4ZK3T7M2V8N5RWEYHD`. It holds 48 bits of creation time in milliseconds and 80 random bits.
+
+- **Sortable:** ids sort by creation time, and ids made in the same millisecond by one process still sort in order.
+- **Readable:** the alphabet leaves out `I`, `L`, `O` and `U`, and parsing ignores case.
+
+```ts
+import { Id } from '@jzszdznzzl/localdb';
+
+const id = new Id();
+id.timestamp; // Date the id was created
+id.equals('01jbcx9q4zk3t7m2v8n5rweyhd'); // compares the string form
+
+const parsed = Id.parse(input); // Result<Id, string>, for strings from outside the program
+new Id('not an id'); // throws a TypeError
+```
+
+Ids can be stored inside documents to reference other documents. They come back as `Id` instances:
+
+```ts
+const Post = z.object({ authorId: z.instanceof(Id), text: z.string() });
+```
+
+## API
+
+### `new LocalDB(path, options?)`
+
+| Option     | Default         | Description                                                          |
+| ---------- | --------------- | -------------------------------------------------------------------- |
+| `autosave` | `false`         | `true` saves 500 ms after a change; `{ delay }` sets the wait in ms. |
+| `onError`  | `console.error` | Receives autosave failures. The next change retries the write.       |
+
+| Member                     | Description                                                               |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `collection(name, schema)` | Declares a collection. Declare each one once and share it.                |
+| `load()`                   | Reads the file. A missing file is an empty database. All-or-nothing.      |
+| `save()`                   | Writes pending changes. Calls run one after another.                      |
+| `transaction(fn)`          | Runs a synchronous `fn` and undoes its changes if it throws.              |
+| `close()`                  | Stops autosave, writes pending changes and ends the instance.             |
+| `path`                     | Absolute path of the file.                                                |
+| `collections`              | Names of declared collections and of other collections found in the file. |
+| `hasUnsavedChanges`        | Whether memory differs from the file.                                     |
+
+### Collection
+
+| Method                          | Returns                                      |
+| ------------------------------- | -------------------------------------------- |
+| `insert(value)`                 | `Result<Document, DbFailure>`                |
+| `insertMany(values)`            | `Result<Document[], DbFailure>`, all or none |
+| `get(id)` / `has(id)`           | `Document \| null` / `boolean`               |
+| `find(predicate?)`              | `Document[]`                                 |
+| `findOne(predicate)`            | `Document \| null`                           |
+| `count(predicate?)` / `size`    | `number`                                     |
+| `update(id, change)`            | `Result<Document, DbFailure>`                |
+| `updateMany(predicate, change)` | `Result<Document[], DbFailure>`, all or none |
+| `remove(id)`                    | `boolean`                                    |
+| `removeMany(predicate)`         | `number`                                     |
+
+`change` is either a partial patch (`{ level: 2 }`) or a function that receives the current document and returns the next version. Collections are also iterable: `for (const user of users)`.
+
+## Storage
+
+The file is formatted JSON, keyed by collection and then by id:
+
+```json
+{
+  "version": 1,
+  "collections": {
+    "users": {
+      "01JBCX9Q4ZK3T7M2V8N5RWEYHD": {
+        "name": "Jxsx",
+        "level": 51,
+        "tags": [],
+        "updatedAt": { "__type": "Date", "value": "2026-10-27T14:54:29.668Z" }
+      }
+    }
+  }
+}
+```
+
+- **Extra types:** `Date`, `Map`, `Set`, `BigInt`, `Buffer`, `Uint8Array`, `URL`, `RegExp`, `Id`, `NaN`, `Infinity` and `undefined` in arrays are saved with a `__type` tag and come back as the same types. A user object that has its own `__type` key is wrapped, so it is never mistaken for a tag.
+- **Atomic writes:** a save writes a temporary file next to the database and renames it over the old one, so a crash mid-write leaves the previous version intact.
+- **Undeclared collections:** collections in the file that the program does not declare are kept and written back unchanged.
+- **Transforms:** loading validates stored documents with the same schema, so a schema's transforms must accept their own output.
+
+## Migrating from 1.x (`@imjxsx/localdb`)
+
+Version 2 is a rewrite with a different API and file format:
+
+- **Format:** files are JSON instead of BSON.
+- **Schemas:** every collection takes a zod schema.
+- **Queries:** filters are functions instead of objects.
+- **Ids:** documents have an `id` (`Id`) instead of `__uuid`, and `createdAt` is replaced by `id.timestamp`.
+- **Names:** collection names are used as given, without lowercasing or adding an `s`.
+
+## License
+
+[MIT](./LICENSE)
