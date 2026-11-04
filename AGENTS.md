@@ -222,7 +222,7 @@ This rule does **not** apply to self-evident values such as `0`, `1`, `-1`, `''`
 ### Validation with zod
 
 - Schemas are `PascalCase`, and their inferred type uses the same name.
-- Validate at the boundaries: HTTP input, database rows, environment variables and external API responses. Inside the application, trust the types.
+- Validate at the boundaries: database rows and file contents. Inside the application, trust the types.
 - Reuse domain objects instead of duplicating values: `z.enum(Role)`.
 - When a JSON Schema is needed, generate it with `z.toJSONSchema(Schema)` instead of writing it by hand.
 
@@ -246,7 +246,7 @@ Types are only useful if they are true. The constructs below tell the compiler "
 
 - **`as` is forbidden**, except `as const`. To check that a value matches a type without forcing it, use `satisfies`. In tests, `as` is allowed only to build partial mocks.
 - **`any` is forbidden.** Use `unknown` and narrow it with a schema, `typeof`, `instanceof` or `in`.
-- **External data is validated before use.** Anything coming from `JSON.parse`, `response.json()`, request bodies, database drivers, `process.env` or third-party APIs is `unknown` until it passes a zod schema.
+- **External data is validated before use.** Anything coming from `JSON.parse`, file contents or third-party APIs is `unknown` until it passes a zod schema.
 - **Nullable values are checked, not asserted.** If something can be `null` or `undefined`, handle that case explicitly.
 - **`!` only when existence is already guaranteed** and TypeScript cannot infer it. Rewrite the code without `!` whenever possible. Otherwise, disable the lint rule on that line and explain why it is safe.
 - **No homemade type guards for external data.** A function returning `value is User` that does not fully validate is a hidden `as`; use `User.safeParse()` instead. Type guards are fine for internal unions, such as checking a discriminant field.

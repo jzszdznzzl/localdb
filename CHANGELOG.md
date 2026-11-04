@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1
+
+### Changed
+
+- Improved the English and Spanish README license footers.
+
 ## 2.2.0
 
 ### Added

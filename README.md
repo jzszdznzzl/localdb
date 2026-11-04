@@ -275,6 +275,12 @@ Version 2 is a rewrite with a different API and file format:
 
 Setup, scripts and workflow are in [CONTRIBUTING.md](./CONTRIBUTING.md). The coding rules, for humans and AI assistants alike, are in [AGENTS.md](./AGENTS.md).
 
-## License
+---
 
-[MIT](./LICENSE) © José Daniel Cristaldo Vera
+<div align="center">
+  <a href="./LICENSE"><img src="https://raw.githubusercontent.com/jzszdznzzl/localdb/main/assets/license-mit.svg" alt="MIT License" width="72"></a>
+  <br>
+  <strong><a href="./LICENSE">MIT License</a></strong>
+  <br>
+  © 2025–2026 José Daniel Cristaldo Vera
+</div>

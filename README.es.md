@@ -276,6 +276,12 @@ La versión 2 es una reescritura, con otra API y otro formato de archivo:
 
 La configuración, los scripts y el flujo de trabajo están en [CONTRIBUTING.md](./CONTRIBUTING.md). Las reglas de código, para personas y asistentes de IA, están en [AGENTS.md](./AGENTS.md).
 
-## Licencia
+---
 
-[MIT](./LICENSE) © José Daniel Cristaldo Vera
+<div align="center">
+  <a href="./LICENSE"><img src="https://raw.githubusercontent.com/jzszdznzzl/localdb/main/assets/license-mit.svg" alt="Licencia MIT" width="72"></a>
+  <br>
+  <strong><a href="./LICENSE">Licencia MIT</a></strong>
+  <br>
+  © 2025–2026 José Daniel Cristaldo Vera
+</div>
