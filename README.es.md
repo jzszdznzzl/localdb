@@ -203,11 +203,27 @@ db.transaction(() => {
 | `load()`                   | Lee el archivo. Si no existe, la base empieza vacía. Se aplica todo o nada.                              |
 | `save()`                   | Agrega los cambios pendientes, o reescribe el archivo si creció demasiado. Las llamadas corren de a una. |
 | `compact()`                | Reescribe el archivo solo con los documentos actuales.                                                   |
+| `stats()`                  | Devuelve estadísticas y el tamaño del archivo sin guardar cambios.                                       |
 | `transaction(fn)`          | Ejecuta `fn` (síncrona) y deshace sus cambios si lanza un error.                                         |
 | `close()`                  | Detiene el autosave, guarda lo pendiente y cierra la instancia.                                          |
 | `path`                     | Ruta absoluta del archivo.                                                                               |
 | `collections`              | Nombres de las colecciones declaradas y de las demás que haya en el archivo.                             |
 | `hasUnsavedChanges`        | Si la memoria tiene cambios que no están en el archivo.                                                  |
+
+### Estadísticas de la base de datos
+
+`await db.stats()` devuelve la ruta y el tamaño del archivo, las cantidades de colecciones y
+documentos, las operaciones del archivo, los cambios pendientes y si el próximo guardado
+reescribirá el archivo. El array `collections` incluye el nombre, la cantidad de documentos y
+cambios pendientes, y el indicador `isDeclared` de cada colección declarada o no declarada.
+Los tipos exportados `LocalDBStats` y `CollectionStats` describen el resultado.
+
+`fileSizeBytes` es `null` si el archivo no existe. `pendingChanges` cuenta documentos distintos y
+es `null` cuando se requiere una reescritura y ya no se lleva la cuenta individual; esto también
+se aplica a cada colección. El método espera las escrituras en cola, pero no guarda los cambios
+pendientes. Los conteos son una instantánea y el tamaño puede cambiar si hay una escritura
+simultánea. La base debe estar cargada y abierta; los errores del sistema de archivos distintos de
+un archivo inexistente se propagan.
 
 ### Colección
 

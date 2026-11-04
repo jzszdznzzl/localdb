@@ -18,6 +18,75 @@ const readLines = async (path: string): Promise<unknown[]> =>
 
 const header = { version: 2 };
 
+test('stats reports missing files, pending changes, persisted operations and compaction', async () => {
+  const { db, users } = await openUsers();
+  const initial = await db.stats();
+  assert.equal(initial.path, db.path);
+  assert.equal(initial.fileSizeBytes, null);
+  assert.equal(initial.pendingChanges, null);
+  assert.equal(initial.willRewriteOnSave, true);
+  assert.deepEqual(initial.collections, [
+    { name: 'users', documentCount: 0, pendingChanges: null, isDeclared: true },
+  ]);
+  await db.save();
+
+  const user = unwrap(users.insert({ name: 'a', level: 1 }));
+  unwrap(users.update(user.id, { level: 2 }));
+  const pending = await db.stats();
+  assert.equal(pending.documentCount, 1);
+  assert.equal(pending.collectionCount, 1);
+  assert.equal(pending.pendingChanges, 1);
+  assert.equal(pending.collections[0]?.pendingChanges, 1);
+  assert.equal(pending.hasUnsavedChanges, true);
+  assert.equal(pending.operationCount, 0);
+  assert.equal(pending.willRewriteOnSave, false);
+  await db.save();
+  unwrap(users.update(user.id, { level: 3 }));
+  await db.save();
+
+  const saved = await db.stats();
+  assert.equal(saved.fileSizeBytes, (await stat(db.path)).size);
+  assert.equal(saved.operationCount, 2);
+  assert.equal(saved.pendingChanges, 0);
+  assert.equal(saved.hasUnsavedChanges, false);
+  await db.compact();
+  assert.equal((await db.stats()).operationCount, 1);
+});
+
+test('stats includes undeclared collections and reports torn files as requiring a rewrite', async () => {
+  const { db, users } = await openUsers();
+  const posts = db.collection('posts', z.object({ title: z.string() }));
+  unwrap(users.insert({ name: 'a', level: 1 }));
+  unwrap(posts.insert({ title: 'post' }));
+  await db.save();
+  await appendFile(db.path, '{"col":');
+
+  const reloaded = await openUsers(db.path);
+  const stats = await reloaded.db.stats();
+  assert.equal(stats.documentCount, 2);
+  assert.equal(stats.collectionCount, 2);
+  assert.equal(stats.operationCount, 2);
+  assert.equal(stats.pendingChanges, null);
+  assert.equal(stats.willRewriteOnSave, true);
+  assert.deepEqual(stats.collections, [
+    { name: 'users', documentCount: 1, pendingChanges: null, isDeclared: true },
+    { name: 'posts', documentCount: 1, pendingChanges: null, isDeclared: false },
+  ]);
+});
+
+test('stats waits for queued writes and requires an open, loaded database', async () => {
+  const db = new LocalDB(await tempFile());
+  await assert.rejects(db.stats(), /not loaded/);
+  assert.equal((await db.load()).error, null);
+  const saving = db.save();
+  const stats = await db.stats();
+  await saving;
+  assert.equal(stats.hasUnsavedChanges, false);
+  assert.equal(stats.fileSizeBytes, (await stat(db.path)).size);
+  await db.close();
+  await assert.rejects(db.stats(), /closed/);
+});
+
 test('documents survive a save and a fresh load, with their types', async () => {
   const path = await tempFile();
   const Post = z.object({ authorId: z.instanceof(Id), at: z.date(), views: z.bigint() });
@@ -198,6 +267,9 @@ test('a large batch of changes is saved as a rewrite instead of one huge line', 
   const { db, users } = await openUsers();
   await db.save();
   unwrap(users.insertMany(Array.from({ length: 10_001 }, (_, level) => ({ name: 'a', level }))));
+  const stats = await db.stats();
+  assert.equal(stats.pendingChanges, null);
+  assert.equal(stats.willRewriteOnSave, true);
   await db.save();
 
   const lines = await readLines(db.path);

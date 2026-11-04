@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
 
 import { Collection } from './collection.ts';
 import { DbError, failure } from './errors.ts';
@@ -18,6 +19,25 @@ export interface LocalDBOptions {
   autosave?: boolean | { delay: number };
   /** Receives autosave failures. Defaults to `console.error`; the next change retries the write. */
   onError?: (error: unknown) => void;
+}
+
+export interface CollectionStats {
+  name: string;
+  documentCount: number;
+  pendingChanges: number | null;
+  isDeclared: boolean;
+}
+
+export interface LocalDBStats {
+  path: string;
+  fileSizeBytes: number | null;
+  collectionCount: number;
+  documentCount: number;
+  operationCount: number;
+  pendingChanges: number | null;
+  hasUnsavedChanges: boolean;
+  willRewriteOnSave: boolean;
+  collections: CollectionStats[];
 }
 
 const DEFAULT_AUTOSAVE_DELAY = 500;
@@ -377,6 +397,54 @@ export class LocalDB {
     this.#isLoaded = true;
 
     return ok(undefined);
+  }
+
+  /** Returns diagnostic counts after queued writes finish, without saving pending changes. */
+  async stats(): Promise<LocalDBStats> {
+    this.#assertReady();
+    await this.#writes.catch(ignore);
+    this.#assertReady();
+
+    const documentCount = this.#liveCount();
+    const hasUnsavedChanges = this.hasUnsavedChanges;
+    const pendingChanges = this.#needsRewrite ? null : this.#pendingSize;
+    const collections = this.collections.map((name): CollectionStats => {
+      const handle = this.#handles.get(name);
+
+      return {
+        name,
+        documentCount: handle?.size ?? this.#undeclared.get(name)?.size ?? 0,
+        pendingChanges: this.#needsRewrite ? null : (this.#pending.get(name)?.size ?? 0),
+        isDeclared: handle !== undefined,
+      };
+    });
+    const willRewriteOnSave =
+      hasUnsavedChanges &&
+      (this.#needsRewrite ||
+        this.#fileOperations + this.#pendingSize > documentCount * COMPACT_RATIO + COMPACT_SLACK);
+    const operationCount = this.#fileOperations;
+    let fileSizeBytes: number | null;
+
+    try {
+      fileSizeBytes = (await stat(this.#path)).size;
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+        throw error;
+      }
+      fileSizeBytes = null;
+    }
+
+    return {
+      path: this.#path,
+      fileSizeBytes,
+      collectionCount: collections.length,
+      documentCount,
+      operationCount,
+      pendingChanges,
+      hasUnsavedChanges,
+      willRewriteOnSave,
+      collections,
+    };
   }
 
   /**

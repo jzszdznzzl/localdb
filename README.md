@@ -203,11 +203,26 @@ db.transaction(() => {
 | `load()`                   | Reads the file. A missing file is an empty database. All-or-nothing.                                    |
 | `save()`                   | Appends pending changes, or rewrites the file when it has grown too large. Calls run one after another. |
 | `compact()`                | Rewrites the file with only the current documents.                                                      |
+| `stats()`                  | Returns diagnostic counts and file size without saving changes.                                         |
 | `transaction(fn)`          | Runs a synchronous `fn` and undoes its changes if it throws.                                            |
 | `close()`                  | Stops autosave, writes pending changes and ends the instance.                                           |
 | `path`                     | Absolute path of the file.                                                                              |
 | `collections`              | Names of declared collections and of other collections found in the file.                               |
 | `hasUnsavedChanges`        | Whether memory differs from the file.                                                                   |
+
+### Database statistics
+
+`await db.stats()` returns the file path and size, collection and document counts, the number of
+operations in the file, pending changes, and whether the next save will rewrite the file. Its
+`collections` array includes the name, document count, pending changes and `isDeclared` flag for
+each declared or undeclared collection. The exported `LocalDBStats` and `CollectionStats` types
+describe the result.
+
+`fileSizeBytes` is `null` when the file does not exist. `pendingChanges` counts distinct documents
+and is `null` when a rewrite is required and individual changes are no longer tracked; this also
+applies to each collection. The method waits for queued writes but does not save pending changes.
+Its counts are a snapshot, and the file size may change if a write runs concurrently. It requires
+an open, loaded database and throws on file system errors other than a missing file.
 
 ### Collection
 
