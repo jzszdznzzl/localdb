@@ -1,6 +1,6 @@
 {
   "name": "@jzszdznzzl/localdb",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Typed JSON document store for Node.js and Bun: validated with zod, saved in one append-only file, no server.",
   "keywords": [
     "database",

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0
+
+### Changed
+
+- Documented the npm release process and automated publication from GitHub releases.
+
 ## 2.0.0
 
 A rewrite, published under a new name: `@jzszdznzzl/localdb` replaces `@imjxsx/localdb`.
